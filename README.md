@@ -217,13 +217,28 @@ Run `bun run build` after changing the component: the example imports it from `d
 
 ## Development
 
+Requires [Bun](https://bun.com).
+
 ```sh
+bun install
 bun run codegen        # regenerate component types
 bun run build          # build the package
 bun run test           # unit and component tests with mocked fetch
 bun run test:live      # calls the real free MCP profile
-bun run check          # TypeScript and ESLint
+bun run check          # Biome, TypeScript and ESLint
 ```
+
+## Releasing
+
+Run **Actions** -> **Publish Release** on `main`. Pick `patch`, `minor` or
+`major`; the workflow bumps `package.json`, publishes to npm with provenance
+through trusted publishing, and creates a `v<version>` GitHub release. Pick
+`none` to publish the version already in `package.json`.
+
+npm cannot create a new package through trusted publishing, so the first
+release needs a one-time bootstrap: publish a `0.0.0` placeholder with a
+temporary token, then add a trusted publisher on npmjs.com for
+`youdotcom-oss/convex-youcom-search` with workflow `publish.yml`.
 
 ## License
 

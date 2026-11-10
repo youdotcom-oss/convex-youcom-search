@@ -5,13 +5,12 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/youdotcom-oss/agent-skills.git",
-    "directory": "packages/convex-search"
+    "url": "git+https://github.com/youdotcom-oss/convex-youcom-search.git"
   },
   "bugs": {
-    "url": "https://github.com/youdotcom-oss/agent-skills/issues"
+    "url": "https://github.com/youdotcom-oss/convex-youcom-search/issues"
   },
-  "homepage": "https://github.com/youdotcom-oss/agent-skills/tree/main/packages/convex-search#readme",
+  "homepage": "https://github.com/youdotcom-oss/convex-youcom-search#readme",
   "author": {
     "name": "You.com",
     "email": "support@you.com",
@@ -65,12 +64,13 @@
   },
   "scripts": {
     "build": "tsc6 --project ./tsconfig.build.json",
-    "check": "tsc6 --noEmit && tsc6 -p example && tsc6 -p example/convex && eslint .",
+    "check": "biome check && tsc6 --noEmit && tsc6 -p example && tsc6 -p example/convex && eslint .",
     "codegen": "convex codegen --component-dir ./src/component",
     "dev": "convex dev",
     "dev:frontend": "cd example && vite",
     "test": "vitest run --typecheck",
-    "test:live": "YOU_LIVE=1 vitest run src/component/youApi.live.test.ts"
+    "test:live": "YOU_LIVE=1 vitest run src/component/youApi.live.test.ts",
+    "format": "biome check --write"
   },
   "peerDependenciesMeta": {
     "@convex-dev/agent": {
@@ -92,6 +92,7 @@
   },
   "devDependencies": {
     "@ai-sdk/openai": "^4.0.111",
+    "@biomejs/biome": "2.5.15",
     "@convex-dev/agent": "^0.7.9",
     "@convex-dev/eslint-plugin": "^5.0.0",
     "@edge-runtime/vm": "^5.0.0",
@@ -110,5 +111,8 @@
     "vite": "8.2.4",
     "vitest": "4.1.11",
     "zod": "^4.6.7"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

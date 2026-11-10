@@ -1,4 +1,10 @@
+.DS_Store
 dist
 node_modules
 .eslintcache
 .convex
+.env
+.env.local
+*.tsbuildinfo
+coverage
+package-lock.json
