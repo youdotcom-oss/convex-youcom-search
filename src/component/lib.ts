@@ -3,19 +3,31 @@
 import { v } from 'convex/values'
 import { internal } from './_generated/api.js'
 import type { Doc } from './_generated/dataModel.js'
-import { action, internalMutation, internalQuery, type MutationCtx, mutation, query } from './_generated/server.js'
+import { action, env, internalMutation, internalQuery, type MutationCtx, mutation, query } from './_generated/server.js'
 import {
+  contentsFormatValidator,
+  type Page,
+  pageValidator,
   resultValidator,
   type SearchResponse,
   searchParamsValidator,
   searchResponseValidator,
   sourceValidator,
 } from './validators.js'
-import { canonicalize, fetchSearch, hashKey, normalizeParams, type Source } from './youApi.js'
+import { canonicalize, fetchContents, fetchSearch, hashKey, normalizeParams, type Source } from './youApi.js'
 
 /** Default cache lifetime: one hour. */
 export const DEFAULT_TTL_MS = 60 * 60 * 1000
 const MAX_TTL_MS = 30 * 24 * 60 * 60 * 1000
+
+/** The component's API key, or undefined for keyless search. Read inside handlers only. */
+function apiKey(): string | undefined {
+  return env.YDC_API_KEY || undefined
+}
+
+function sourceFor(keyless: boolean | undefined): Source {
+  return !keyless && apiKey() ? 'keyed' : 'keyless'
+}
 
 function keyFor(params: Doc<'searches'>['params'], source: Source) {
   const normalized = normalizeParams(params, source)
@@ -38,19 +50,21 @@ function toResponse(doc: Doc<'searches'>, cached: boolean): SearchResponse {
 /**
  * Search the web with You.com, reading from and writing to the cache.
  *
- * With no `apiKey` this calls You.com's free MCP profile. Pass `apiKey` to use the
- * keyed API. The key is only used for the outbound request; it is not stored.
+ * Uses the keyed API when the component's `YDC_API_KEY` env var is set, and
+ * You.com's free MCP profile otherwise or when `keyless` is true. The key is
+ * read from the component env for the outbound request only; it is never a
+ * function argument and is never stored.
  */
 export const search = action({
   args: {
     params: searchParamsValidator,
-    apiKey: v.optional(v.string()),
+    keyless: v.optional(v.boolean()),
     ttlMs: v.optional(v.number()),
     force: v.optional(v.boolean()),
   },
   returns: searchResponseValidator,
   handler: async (ctx, args): Promise<SearchResponse> => {
-    const source: Source = args.apiKey ? 'keyed' : 'keyless'
+    const source = sourceFor(args.keyless)
     const { normalized, canonical, cacheKey } = keyFor(args.params, source)
 
     if (!args.force) {
@@ -62,7 +76,7 @@ export const search = action({
       if (hit) return toResponse(hit, true)
     }
 
-    const fetched = await fetchSearch(normalized, { apiKey: args.apiKey })
+    const fetched = await fetchSearch(normalized, { apiKey: source === 'keyed' ? apiKey() : undefined })
     const requestedTtl = Number.isFinite(args.ttlMs) ? (args.ttlMs as number) : DEFAULT_TTL_MS
     const ttl = Math.min(MAX_TTL_MS, Math.max(0, requestedTtl))
     const fetchedAt = Date.now()
@@ -118,7 +132,7 @@ export const store = internalMutation({
 
 /**
  * Reactive read of a cached search. Returns null when there is no entry or
- * the entry has expired. Pass the same params (and `keyed`) used for search.
+ * the entry has expired. Pass the same params (and `keyless`) used for search.
  *
  * Expiry is checked against `now` when given, otherwise against the time the
  * query runs. Convex re-runs queries when the underlying rows change, not on
@@ -127,12 +141,12 @@ export const store = internalMutation({
 export const getCached = query({
   args: {
     params: searchParamsValidator,
-    keyed: v.optional(v.boolean()),
+    keyless: v.optional(v.boolean()),
     includeExpired: v.optional(v.boolean()),
   },
   returns: v.union(v.null(), searchResponseValidator),
   handler: async (ctx, args) => {
-    const source: Source = args.keyed ? 'keyed' : 'keyless'
+    const source = sourceFor(args.keyless)
     let key: ReturnType<typeof keyFor>
     try {
       key = keyFor(args.params, source)
@@ -147,6 +161,25 @@ export const getCached = query({
     if (!row) return null
     if (!args.includeExpired && row.expiresAt <= Date.now()) return null
     return toResponse(row, true)
+  },
+})
+
+/**
+ * Fetch page content for up to 10 known URLs with the keyed contents API.
+ * Returns one entry per URL in request order. Requires `YDC_API_KEY`.
+ */
+export const contents = action({
+  args: {
+    urls: v.array(v.string()),
+    formats: v.optional(v.array(contentsFormatValidator)),
+    crawlTimeout: v.optional(v.number()),
+    maxAge: v.optional(v.number()),
+  },
+  returns: v.array(pageValidator),
+  handler: async (_ctx, args): Promise<Page[]> => {
+    const key = apiKey()
+    if (!key) throw new Error('contents needs YDC_API_KEY set on the component; the free profile does not support it')
+    return await fetchContents({ ...args, apiKey: key })
   },
 })
 
@@ -167,10 +200,10 @@ export const listRecent = query({
 
 /** Drop the cache entry for one request so the next search refetches. */
 export const invalidate = mutation({
-  args: { params: searchParamsValidator, keyed: v.optional(v.boolean()) },
+  args: { params: searchParamsValidator, keyless: v.optional(v.boolean()) },
   returns: v.number(),
   handler: async (ctx, args) => {
-    const source: Source = args.keyed ? 'keyed' : 'keyless'
+    const source = sourceFor(args.keyless)
     const { cacheKey, canonical } = keyFor(args.params, source)
     const rows = await ctx.db
       .query('searches')

@@ -1,12 +1,17 @@
 /// <reference types="vite/client" />
-import { afterEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { api, internal } from './_generated/api.js'
 import { initConvexTest, mockYouFetch } from './setup.test.js'
 import { canonicalize, hashKey, normalizeParams } from './youApi.js'
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.unstubAllEnvs()
   vi.useRealTimers()
+})
+
+beforeEach(() => {
+  vi.stubEnv('YDC_API_KEY', '')
 })
 
 describe('search action', () => {
@@ -50,14 +55,16 @@ describe('search action', () => {
     await t.action(api.lib.search, {
       params: { query: 'a', freshness: 'day' },
     })
-    await t.action(api.lib.search, { params: { query: 'a' }, apiKey: 'k' })
+    vi.stubEnv('YDC_API_KEY', 'k')
+    await t.action(api.lib.search, { params: { query: 'a' } })
     expect(mock.calls).toHaveLength(3)
     expect(await t.query(api.lib.listRecent, {})).toHaveLength(3)
   })
 
-  test('keyed: POSTs to ydc-index with X-API-Key and does not store the key', async () => {
+  test('keyed: reads YDC_API_KEY from the component env, POSTs to ydc-index, and does not store the key', async () => {
     const mock = mockYouFetch()
     vi.stubGlobal('fetch', mock.fn)
+    vi.stubEnv('YDC_API_KEY', 'secret-key')
     const t = initConvexTest()
     const res = await t.action(api.lib.search, {
       params: {
@@ -65,7 +72,6 @@ describe('search action', () => {
         highlights: true,
         includeDomains: ['B.com', 'a.com'],
       },
-      apiKey: 'secret-key',
     })
     expect(res.source).toBe('keyed')
     const call = mock.calls[0]
@@ -169,12 +175,15 @@ describe('search action', () => {
     expect(rows).toHaveLength(2)
   })
 
-  test('keyless and keyed results are cached separately and getCached honors keyed', async () => {
+  test('keyless and keyed results are cached separately and getCached follows the component key', async () => {
     vi.stubGlobal('fetch', mockYouFetch().fn)
     const t = initConvexTest()
-    await t.action(api.lib.search, { params: { query: 'k' }, apiKey: 'key' })
+    vi.stubEnv('YDC_API_KEY', 'key')
+    await t.action(api.lib.search, { params: { query: 'k' } })
+    expect(await t.query(api.lib.getCached, { params: { query: 'k' }, keyless: true })).toBeNull()
+    expect((await t.query(api.lib.getCached, { params: { query: 'k' } }))?.source).toBe('keyed')
+    vi.stubEnv('YDC_API_KEY', '')
     expect(await t.query(api.lib.getCached, { params: { query: 'k' } })).toBeNull()
-    expect((await t.query(api.lib.getCached, { params: { query: 'k' }, keyed: true }))?.source).toBe('keyed')
   })
 
   test('ttlMs is clamped to the range 0 to 30 days', async () => {
@@ -242,5 +251,113 @@ describe('search action', () => {
     await t.finishAllScheduledFunctions(vi.runAllTimers)
     const left = await t.run(async (ctx) => ctx.db.query('searches').collect())
     expect(left.map((r) => r.params.query)).toEqual(['live'])
+  })
+
+  test('keyless: true uses the free profile even when a key is set', async () => {
+    const mock = mockYouFetch()
+    vi.stubGlobal('fetch', mock.fn)
+    vi.stubEnv('YDC_API_KEY', 'key')
+    const t = initConvexTest()
+    const res = await t.action(api.lib.search, { params: { query: 'free' }, keyless: true })
+    expect(res.source).toBe('keyless')
+    expect(mock.calls[0].url).toBe('https://api.you.com/mcp?profile=free')
+  })
+
+  test('the search action does not accept an API key argument', async () => {
+    vi.stubGlobal('fetch', mockYouFetch().fn)
+    const t = initConvexTest()
+    await expect(
+      t.action(api.lib.search, { params: { query: 'x' }, apiKey: 'k' } as unknown as { params: { query: string } }),
+    ).rejects.toThrow(/apiKey/)
+  })
+})
+
+describe('contents action', () => {
+  const pages = [
+    {
+      url: 'https://b.com/',
+      title: 'B',
+      markdown: '# B',
+      metadata: { site_name: 'B site', favicon_url: 'https://f/b' },
+    },
+    { url: 'https://a.com/', title: 'A', markdown: '# A', html: null },
+  ]
+  const mockContents = (body: unknown = pages, status = 200) => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fn = async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init })
+      return new Response(JSON.stringify(body), { status })
+    }
+    return { fn: fn as typeof fetch, calls }
+  }
+
+  test('POSTs to /v1/contents with the key and returns pages in request order', async () => {
+    const mock = mockContents()
+    vi.stubGlobal('fetch', mock.fn)
+    vi.stubEnv('YDC_API_KEY', 'secret-key')
+    const t = initConvexTest()
+    const res = await t.action(api.lib.contents, { urls: ['https://a.com/', 'https://b.com/', 'https://c.com/'] })
+    expect(mock.calls[0].url).toBe('https://ydc-index.io/v1/contents')
+    expect(new Headers(mock.calls[0].init?.headers).get('X-API-Key')).toBe('secret-key')
+    expect(JSON.parse(String(mock.calls[0].init?.body))).toEqual({
+      urls: ['https://a.com/', 'https://b.com/', 'https://c.com/'],
+      formats: ['markdown'],
+    })
+    expect(res).toEqual([
+      { url: 'https://a.com/', title: 'A', markdown: '# A' },
+      { url: 'https://b.com/', title: 'B', markdown: '# B', siteName: 'B site', faviconUrl: 'https://f/b' },
+      { url: 'https://c.com/', error: 'No content returned for this URL.' },
+    ])
+  })
+
+  test('forwards formats, crawlTimeout and maxAge', async () => {
+    const mock = mockContents([])
+    vi.stubGlobal('fetch', mock.fn)
+    vi.stubEnv('YDC_API_KEY', 'k')
+    const t = initConvexTest()
+    await t.action(api.lib.contents, {
+      urls: ['https://a.com/'],
+      formats: ['html', 'metadata'],
+      crawlTimeout: 20,
+      maxAge: 0,
+    })
+    expect(JSON.parse(String(mock.calls[0].init?.body))).toEqual({
+      urls: ['https://a.com/'],
+      formats: ['html', 'metadata'],
+      crawl_timeout: 20,
+      max_age: 0,
+    })
+  })
+
+  test('rejects bad input before calling the API', async () => {
+    const mock = mockContents()
+    vi.stubGlobal('fetch', mock.fn)
+    vi.stubEnv('YDC_API_KEY', 'k')
+    const t = initConvexTest()
+    await expect(t.action(api.lib.contents, { urls: [] })).rejects.toThrow(/at least one URL/)
+    await expect(
+      t.action(api.lib.contents, { urls: Array.from({ length: 11 }, (_, i) => `https://a.com/${i}`) }),
+    ).rejects.toThrow(/at most 10/)
+    await expect(t.action(api.lib.contents, { urls: ['ftp://a.com/x'] })).rejects.toThrow(/http/)
+    await expect(t.action(api.lib.contents, { urls: ['not a url'] })).rejects.toThrow(/http/)
+    await expect(t.action(api.lib.contents, { urls: ['https://a.com/'], crawlTimeout: 61 })).rejects.toThrow(
+      /crawlTimeout/,
+    )
+    expect(mock.calls).toHaveLength(0)
+  })
+
+  test('needs YDC_API_KEY', async () => {
+    const mock = mockContents()
+    vi.stubGlobal('fetch', mock.fn)
+    const t = initConvexTest()
+    await expect(t.action(api.lib.contents, { urls: ['https://a.com/'] })).rejects.toThrow(/YDC_API_KEY/)
+    expect(mock.calls).toHaveLength(0)
+  })
+
+  test('API errors carry the status', async () => {
+    vi.stubGlobal('fetch', mockContents({ error: 'nope' }, 401).fn)
+    vi.stubEnv('YDC_API_KEY', 'bad')
+    const t = initConvexTest()
+    await expect(t.action(api.lib.contents, { urls: ['https://a.com/'] })).rejects.toThrow(/401/)
   })
 })

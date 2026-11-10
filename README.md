@@ -9,6 +9,8 @@ from [You.com](https://you.com) to your Convex backend.
   are served from your database.
 - Cached results can be read from a Convex query, so a UI subscribed to a search
   updates when new results land.
+- Reads full page content for URLs you already have, such as the top search
+  results (requires `YDC_API_KEY`).
 - Includes a `webSearch` tool for
   [`@convex-dev/agent`](https://www.convex.dev/components/agent).
 
@@ -18,6 +20,13 @@ const results = await youSearch.search(ctx, { query: "convex components" });
 ```
 
 <!-- START: Include on https://convex.dev/components -->
+
+## Requirements
+
+- Convex 1.43 or later.
+- A You.com API key is optional. Without one, search uses the free profile
+  (100 searches per day). `contents` needs a key.
+- `@convex-dev/agent`, `ai`, and `zod` only if you use the agent tool.
 
 ## Install
 
@@ -38,6 +47,27 @@ export default app;
 ```
 
 Then run `npx convex dev` so Convex generates `components.youSearch`.
+
+To use the keyed API, declare `YDC_API_KEY` on your app and pass it to the
+component. The component reads it from its own environment, so the key never
+appears in function arguments:
+
+```ts
+import { defineApp } from "convex/server";
+import { v } from "convex/values";
+import youSearch from "@youdotcom-oss/convex-search/convex.config.js";
+
+const app = defineApp({
+  env: { YDC_API_KEY: v.optional(v.string()) },
+});
+app.use(youSearch, { env: { YDC_API_KEY: app.env.YDC_API_KEY } });
+
+export default app;
+```
+
+```sh
+npx convex env set YDC_API_KEY <your key>
+```
 
 ## Usage
 
@@ -108,21 +138,43 @@ results, You.com returns HTTP 402 and the component throws an error that says
 so.
 
 For production traffic, get an API key at
-[you.com/platform](https://you.com/platform) and set it on your deployment:
-
-```sh
-npx convex env set YDC_API_KEY <your key>
-```
-
-The client reads `YDC_API_KEY` at call time. You can also pass the key in code
-with `new YouSearch(components.youSearch, { apiKey })`, or force keyless with
-`apiKey: null`. With a key, searches go to
+[you.com/platform](https://you.com/platform) and pass it to the component as
+shown in [Install](#install). With a key, searches go to
 `POST https://ydc-index.io/v1/search`, which supports up to 100 results. See the
 [Web Search API reference](https://you.com/docs/api-reference/search/v1-search)
-for details and pricing.
+for details and pricing. Use `new YouSearch(components.youSearch, { keyless: true })`
+to stay on the free profile even when a key is set.
 
-The key is passed to the component's action for the outbound request only. It is
-not written to the component's tables.
+The component reads the key from its own environment for outbound requests
+only. It is never a function argument and is never written to the component's
+tables.
+
+## Reading pages
+
+`contents` fetches page content for up to 10 URLs you already have, such as the
+top results of a search. It uses `POST https://ydc-index.io/v1/contents` and
+needs `YDC_API_KEY`.
+
+```ts
+export const read = action({
+  args: { urls: v.array(v.string()) },
+  handler: async (ctx, args) => {
+    return await youSearch.contents(ctx, { urls: args.urls });
+  },
+});
+// [{ url, title, markdown }, ...] in request order
+```
+
+| Option         | Type                                         | Notes                                              |
+| -------------- | -------------------------------------------- | -------------------------------------------------- |
+| `urls`         | `string[]`                                   | Required. 1 to 10 absolute http(s) URLs.           |
+| `formats`      | `("markdown" \| "html" \| "metadata")[]`     | Defaults to `["markdown"]`.                        |
+| `crawlTimeout` | `number`                                     | Seconds to wait per page, 1 to 60. Defaults to 10. |
+| `maxAge`       | `number`                                     | Max age of cached content in seconds. `0` refetches. |
+
+Each page has `url` and, when available, `title`, `markdown`, `html`,
+`siteName` and `faviconUrl`. A URL that returned nothing has `error` set
+instead. Page content is not cached by the component.
 
 ## Caching
 
@@ -205,11 +257,13 @@ bun run dev           # Convex backend
 bun run dev:frontend  # Vite app, in a second terminal
 ```
 
-The UI does not call the agent or `invalidate`. Run them from the CLI:
+The UI does not call the agent, `read`, or `invalidate`. Run them from the CLI:
 
 ```sh
 npx convex env set OPENAI_API_KEY <your key>
 npx convex run agent:ask '{"prompt":"What changed in Convex this month?"}'
+npx convex env set YDC_API_KEY <your key>
+npx convex run example:read '{"urls":["https://docs.convex.dev/components"]}'
 npx convex run example:invalidate '{"query":"convex components"}'
 ```
 

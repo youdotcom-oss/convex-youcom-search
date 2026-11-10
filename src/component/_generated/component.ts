@@ -25,12 +25,32 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
   {
     lib: {
       clearAll: FunctionReference<"mutation", "internal", {}, number, Name>;
+      contents: FunctionReference<
+        "action",
+        "internal",
+        {
+          crawlTimeout?: number;
+          formats?: Array<"markdown" | "html" | "metadata">;
+          maxAge?: number;
+          urls: Array<string>;
+        },
+        Array<{
+          error?: string;
+          faviconUrl?: string;
+          html?: string;
+          markdown?: string;
+          siteName?: string;
+          title?: string;
+          url: string;
+        }>,
+        Name
+      >;
       getCached: FunctionReference<
         "query",
         "internal",
         {
           includeExpired?: boolean;
-          keyed?: boolean;
+          keyless?: boolean;
           params: {
             count?: number;
             country?: string;
@@ -68,7 +88,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "mutation",
         "internal",
         {
-          keyed?: boolean;
+          keyless?: boolean;
           params: {
             count?: number;
             country?: string;
@@ -113,8 +133,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "action",
         "internal",
         {
-          apiKey?: string;
           force?: boolean;
+          keyless?: boolean;
           params: {
             count?: number;
             country?: string;

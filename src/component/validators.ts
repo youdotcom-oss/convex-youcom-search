@@ -43,3 +43,18 @@ export const searchResponseValidator = v.object({
   expiresAt: v.number(),
 })
 export type SearchResponse = Infer<typeof searchResponseValidator>
+
+export const contentsFormatValidator = v.union(v.literal('markdown'), v.literal('html'), v.literal('metadata'))
+export type ContentsFormat = Infer<typeof contentsFormatValidator>
+
+/** One fetched page. `error` is set instead of content when a URL returned nothing. */
+export const pageValidator = v.object({
+  url: v.string(),
+  title: v.optional(v.string()),
+  markdown: v.optional(v.string()),
+  html: v.optional(v.string()),
+  siteName: v.optional(v.string()),
+  faviconUrl: v.optional(v.string()),
+  error: v.optional(v.string()),
+})
+export type Page = Infer<typeof pageValidator>
