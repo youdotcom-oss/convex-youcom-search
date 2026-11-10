@@ -4,7 +4,8 @@ import { components } from './_generated/api.js'
 import { action, mutation, query } from './_generated/server.js'
 
 // Keyless by default. Set YDC_API_KEY in the Convex dashboard (or with
-// `npx convex env set YDC_API_KEY ...`) to switch to the keyed API.
+// `npx convex env set YDC_API_KEY ...`) to switch to the keyed API. The key is
+// passed to the component in convex.config.ts.
 const youSearch = new YouSearch(components.youSearch, {
   ttlMs: 60 * 60 * 1000,
   defaultCount: 5,
@@ -39,5 +40,13 @@ export const invalidate = mutation({
   args: { query: v.string(), freshness },
   handler: async (ctx, args) => {
     return await youSearch.invalidate(ctx, args)
+  },
+})
+
+/** Read the full page for URLs you already have, such as top search results. Needs YDC_API_KEY. */
+export const read = action({
+  args: { urls: v.array(v.string()) },
+  handler: async (ctx, args) => {
+    return await youSearch.contents(ctx, { urls: args.urls })
   },
 })

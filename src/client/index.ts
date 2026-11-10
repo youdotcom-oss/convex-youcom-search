@@ -1,23 +1,33 @@
 import type { GenericActionCtx, GenericDataModel, GenericMutationCtx, GenericQueryCtx } from 'convex/server'
 import type { ComponentApi } from '../component/_generated/component.js'
-import type { SearchParams, SearchResponse, SearchResultItem } from '../component/validators.js'
+import type { ContentsFormat, Page, SearchParams, SearchResponse, SearchResultItem } from '../component/validators.js'
 
-export type { SearchParams, SearchResponse, SearchResultItem }
+export type { ContentsFormat, Page, SearchParams, SearchResponse, SearchResultItem }
 
 /** Options for {@link YouSearch}. */
 export type YouSearchOptions = {
   /**
-   * You.com API key. When set, searches use the keyed API
-   * (POST https://ydc-index.io/v1/search). When unset, the client reads
-   * `process.env.YDC_API_KEY`, and if that is unset too it uses the keyless
-   * free MCP profile (`you-search` at https://api.you.com/mcp?profile=free).
-   * Pass `null` to force keyless even when YDC_API_KEY is set.
+   * Always search through the keyless free MCP profile, even when the
+   * component has `YDC_API_KEY`. The key itself is configured on the component
+   * in `convex.config.ts`, never in this client.
    */
-  apiKey?: string | null
+  keyless?: boolean
   /** Cache lifetime for new results, in ms. Defaults to one hour. */
   ttlMs?: number
   /** Default number of results when a call does not set `count`. */
   defaultCount?: number
+}
+
+/** Arguments for {@link YouSearch.contents}. */
+export type ContentsArgs = {
+  /** Up to 10 absolute http(s) URLs. */
+  urls: string[]
+  /** Formats to return. Defaults to `["markdown"]`. */
+  formats?: ContentsFormat[]
+  /** Seconds to wait for each page, 1 to 60. The API default is 10. */
+  crawlTimeout?: number
+  /** Maximum age of cached page content in seconds. `0` forces a fresh fetch. */
+  maxAge?: number
 }
 
 /** Arguments for {@link YouSearch.search}: search params plus cache controls. */
@@ -43,14 +53,8 @@ export class YouSearch {
     public options: YouSearchOptions = {},
   ) {}
 
-  private apiKey(): string | undefined {
-    if (this.options.apiKey === null) return undefined
-    return this.options.apiKey || process.env.YDC_API_KEY || undefined
-  }
-
-  /** True when searches will use the keyed API. */
-  get keyed(): boolean {
-    return this.apiKey() !== undefined
+  private keylessArg(): { keyless?: true } {
+    return this.options.keyless ? { keyless: true } : {}
   }
 
   private params(args: SearchParams): SearchParams {
@@ -66,11 +70,10 @@ export class YouSearch {
    * otherwise calls You.com and caches the response. Call from an action.
    */
   async search(ctx: ActionCtx, args: SearchArgs): Promise<SearchResponse> {
-    const apiKey = this.apiKey()
     const ttlMs = args.ttlMs ?? this.options.ttlMs
     return await ctx.runAction(this.component.lib.search, {
       params: this.params(args),
-      ...(apiKey ? { apiKey } : {}),
+      ...this.keylessArg(),
       ...(ttlMs === undefined ? {} : { ttlMs }),
       ...(args.force ? { force: true } : {}),
     })
@@ -84,9 +87,18 @@ export class YouSearch {
     const { includeExpired, ...params } = args
     return await ctx.runQuery(this.component.lib.getCached, {
       params: this.params(params),
-      keyed: this.keyed,
+      ...this.keylessArg(),
       ...(includeExpired ? { includeExpired } : {}),
     })
+  }
+
+  /**
+   * Fetch page content for known URLs, for example the top results of a
+   * search. Returns one entry per URL in request order; a URL that returned
+   * nothing has `error` set. Requires `YDC_API_KEY` on the component.
+   */
+  async contents(ctx: ActionCtx, args: ContentsArgs): Promise<Page[]> {
+    return await ctx.runAction(this.component.lib.contents, args)
   }
 
   /** Most recent cached searches, newest first. */
@@ -98,7 +110,7 @@ export class YouSearch {
   async invalidate(ctx: MutationCtx, args: SearchParams): Promise<number> {
     return await ctx.runMutation(this.component.lib.invalidate, {
       params: this.params(args),
-      keyed: this.keyed,
+      ...this.keylessArg(),
     })
   }
 

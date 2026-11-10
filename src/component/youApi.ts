@@ -1,10 +1,11 @@
 // Thin fetch layer for the You.com search APIs. No Convex imports, so it can
 // be unit tested on its own (including against the live free MCP profile).
 import pkg from '../../package.json' with { type: 'json' }
-import type { SearchParams, SearchResultItem, Source } from './validators.js'
+import type { ContentsFormat, Page, SearchParams, SearchResultItem, Source } from './validators.js'
 
 export const KEYLESS_SEARCH_URL = 'https://api.you.com/mcp?profile=free'
 export const KEYED_SEARCH_URL = 'https://ydc-index.io/v1/search'
+export const CONTENTS_URL = 'https://ydc-index.io/v1/contents'
 const CLIENT_INFO = `plugin; client=convex-search/${pkg.version}`
 const MCP_REQUEST_ID = 1
 const NO_MCP_RESPONSE = 'You.com keyless search returned no matching JSON-RPC response.'
@@ -248,7 +249,7 @@ function parseMcpResult(body: string): { json?: unknown; error?: string } {
 function describeError(status: number, source: Source, body: string): string {
   const detail = body.slice(0, 300)
   if (status === 402 && source === 'keyless') {
-    return `You.com free MCP search returned 402 Payment Required. The free profile is for light use and has a usage limit; set YDC_API_KEY (or pass apiKey) to use the keyed API. ${detail}`
+    return `You.com free MCP search returned 402 Payment Required. The free profile is for light use and has a usage limit; set YDC_API_KEY on the component to use the keyed API. ${detail}`
   }
   if (status === 401 || status === 403) {
     return `You.com rejected the API key (HTTP ${status}). ${detail}`
@@ -256,7 +257,7 @@ function describeError(status: number, source: Source, body: string): string {
   if (status === 429) {
     return `You.com rate limited the request (HTTP 429). ${detail}`
   }
-  return `You.com search failed with HTTP ${status}. ${detail}`
+  return `You.com request failed with HTTP ${status}. ${detail}`
 }
 
 /** Run one search against You.com. Throws YouSearchError on non-2xx. */
@@ -283,4 +284,94 @@ export async function fetchSearch(params: SearchParams, opts: { apiKey?: string;
     throw new YouSearchError(describeError(res.status, source, text), res.status, source)
   }
   return { source, ...parseResponse(await res.json()) }
+}
+
+/** The contents endpoint accepts at most 10 URLs per request. */
+export const MAX_CONTENTS_URLS = 10
+
+export type ContentsOptions = {
+  urls: string[]
+  formats?: ContentsFormat[]
+  crawlTimeout?: number
+  maxAge?: number
+}
+
+/** Check contents input locally so bad requests fail before they cost a call. */
+export function validateContents(opts: ContentsOptions): void {
+  if (opts.urls.length === 0) throw new Error('contents needs at least one URL')
+  if (opts.urls.length > MAX_CONTENTS_URLS) throw new Error(`contents accepts at most ${MAX_CONTENTS_URLS} URLs`)
+  for (const raw of opts.urls) {
+    let url: URL
+    try {
+      url = new URL(raw)
+    } catch {
+      throw new Error(`contents URLs must be absolute http(s) URLs: ${raw}`)
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      throw new Error(`contents URLs must be absolute http(s) URLs: ${raw}`)
+    }
+  }
+  const t = opts.crawlTimeout
+  if (t !== undefined && !(Number.isInteger(t) && t >= 1 && t <= 60)) {
+    throw new Error('crawlTimeout must be a whole number of seconds from 1 to 60')
+  }
+  const age = opts.maxAge
+  if (age !== undefined && !(Number.isInteger(age) && age >= 0)) {
+    throw new Error('maxAge must be a whole number of seconds, 0 or more')
+  }
+}
+
+type RawPage = {
+  url?: unknown
+  title?: unknown
+  markdown?: unknown
+  html?: unknown
+  metadata?: { site_name?: unknown; favicon_url?: unknown } | null
+}
+
+/** Map the contents response to pages, one per requested URL, in request order. */
+export function parseContents(json: unknown, urls: string[]): Page[] {
+  const byUrl = new Map<string, RawPage>()
+  for (const raw of Array.isArray(json) ? (json as RawPage[]) : []) {
+    const url = str(raw?.url)
+    if (url && !byUrl.has(url)) byUrl.set(url, raw)
+  }
+  return urls.map((url) => {
+    const raw = byUrl.get(url)
+    if (!raw) return { url, error: 'No content returned for this URL.' }
+    const page: Page = { url }
+    const title = str(raw.title)
+    if (title) page.title = title
+    const markdown = str(raw.markdown)
+    if (markdown) page.markdown = markdown
+    const html = str(raw.html)
+    if (html) page.html = html
+    const siteName = str(raw.metadata?.site_name)
+    if (siteName) page.siteName = siteName
+    const faviconUrl = str(raw.metadata?.favicon_url)
+    if (faviconUrl) page.faviconUrl = faviconUrl
+    return page
+  })
+}
+
+/** Fetch page content for known URLs. Keyed only: the free profile has no contents tool. */
+export async function fetchContents(opts: ContentsOptions & { apiKey: string; fetch?: typeof fetch }): Promise<Page[]> {
+  validateContents(opts)
+  const body: Record<string, unknown> = { urls: opts.urls, formats: opts.formats ?? ['markdown'] }
+  if (opts.crawlTimeout !== undefined) body.crawl_timeout = opts.crawlTimeout
+  if (opts.maxAge !== undefined) body.max_age = opts.maxAge
+  const res = await (opts.fetch ?? fetch)(CONTENTS_URL, {
+    method: 'POST',
+    headers: {
+      'X-API-Key': opts.apiKey,
+      'Content-Type': 'application/json',
+      'X-Client-Info': CLIENT_INFO,
+    },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new YouSearchError(describeError(res.status, 'keyed', text), res.status, 'keyed')
+  }
+  return parseContents(await res.json(), opts.urls)
 }

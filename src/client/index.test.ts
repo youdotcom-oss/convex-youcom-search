@@ -15,11 +15,9 @@ const app = defineTestApp({
 })
 const youSearch = new YouSearch(app.components.youSearch, {
   defaultCount: 4,
-  apiKey: null,
+  keyless: true,
 })
-const keyedSearch = new YouSearch(app.components.youSearch, {
-  apiKey: 'test-key',
-})
+const keyedSearch = new YouSearch(app.components.youSearch)
 const tool = youSearchTool(youSearch, { maxCount: 3 })
 
 const { api, createTest } = app.defineModules({
@@ -35,6 +33,18 @@ const { api, createTest } = app.defineModules({
       args: { query: v.string() },
       handler: async (ctx, args) => {
         return await youSearch.getCached(ctx, { query: args.query })
+      },
+    }),
+    cachedKeyed: app.query({
+      args: { query: v.string() },
+      handler: async (ctx, args) => {
+        return await keyedSearch.getCached(ctx, { query: args.query })
+      },
+    }),
+    read: app.action({
+      args: { urls: v.array(v.string()) },
+      handler: async (ctx, args) => {
+        return await keyedSearch.contents(ctx, { urls: args.urls })
       },
     }),
     invalidate: app.mutation({
@@ -80,21 +90,41 @@ describe('YouSearch client', () => {
     expect(await t.mutation(api.search.invalidate, { query: 'convex' })).toBe(1)
   })
 
-  test('apiKey option switches to the keyed API', async () => {
+  test('uses the keyed API when the component has YDC_API_KEY, and reads the cache it wrote', async () => {
     const mock = mockYouFetch()
     vi.stubGlobal('fetch', mock.fn)
+    vi.stubEnv('YDC_API_KEY', 'test-key')
     const t = createTest()
     const res = await t.action(api.search.run, { query: 'k', keyed: true })
     expect(res.source).toBe('keyed')
     expect(mock.calls[0].url).toBe('https://ydc-index.io/v1/search')
+    expect(new Headers(mock.calls[0].init?.headers).get('X-API-Key')).toBe('test-key')
+    expect((await t.query(api.search.cachedKeyed, { query: 'k' }))?.source).toBe('keyed')
   })
 
-  test('YDC_API_KEY env var is picked up, apiKey: null forces keyless', () => {
-    vi.stubEnv('YDC_API_KEY', 'from-env')
-    expect(new YouSearch(app.components.youSearch).keyed).toBe(true)
-    expect(new YouSearch(app.components.youSearch, { apiKey: null }).keyed).toBe(false)
-    vi.stubEnv('YDC_API_KEY', '')
-    expect(new YouSearch(app.components.youSearch).keyed).toBe(false)
+  test('keyless: true stays on the free profile when a key is set', async () => {
+    const mock = mockYouFetch()
+    vi.stubGlobal('fetch', mock.fn)
+    vi.stubEnv('YDC_API_KEY', 'test-key')
+    const t = createTest()
+    expect((await t.action(api.search.run, { query: 'f' })).source).toBe('keyless')
+    expect(mock.calls[0].url).toBe('https://api.you.com/mcp?profile=free')
+  })
+
+  test('contents reads known URLs through the component', async () => {
+    const calls: Array<{ url: string; body: unknown }> = []
+    vi.stubGlobal('fetch', (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), body: JSON.parse(String(init?.body)) })
+      return Response.json([{ url: 'https://a.com/', title: 'A', markdown: '# A' }])
+    }) as typeof fetch)
+    vi.stubEnv('YDC_API_KEY', 'test-key')
+    const t = createTest()
+    const pages = await t.action(api.search.read, { urls: ['https://a.com/'] })
+    expect(pages).toEqual([{ url: 'https://a.com/', title: 'A', markdown: '# A' }])
+    expect(calls[0]).toEqual({
+      url: 'https://ydc-index.io/v1/contents',
+      body: { urls: ['https://a.com/'], formats: ['markdown'] },
+    })
   })
 
   test('agent tool runs a search and returns model-ready text', async () => {
@@ -121,20 +151,21 @@ describe('YouSearch client options', () => {
     },
   })
 
-  test('forwards ttlMs, force and the default count, and omits the key when keyless', async () => {
+  test('forwards ttlMs, force, keyless and the default count', async () => {
     const calls: Record<string, unknown>[] = []
-    const client = new YouSearch(app.components.youSearch, { apiKey: null, ttlMs: 5, defaultCount: 7 })
+    const client = new YouSearch(app.components.youSearch, { keyless: true, ttlMs: 5, defaultCount: 7 })
     await client.search(echo(calls) as never, { ...plain, force: true })
-    expect(calls[0]).toEqual({ params: { query: 'q', count: 7 }, ttlMs: 5, force: true })
+    expect(calls[0]).toEqual({ params: { query: 'q', count: 7 }, keyless: true, ttlMs: 5, force: true })
     await client.search(echo(calls) as never, { ...plain, count: 2, ttlMs: 9 })
-    expect(calls[1]).toEqual({ params: { query: 'q', count: 2 }, ttlMs: 9 })
+    expect(calls[1]).toEqual({ params: { query: 'q', count: 2 }, keyless: true, ttlMs: 9 })
   })
 
-  test('passes the key to the component only when keyed', async () => {
+  test('never sends an API key to the component', async () => {
+    vi.stubEnv('YDC_API_KEY', 'test-key')
     const calls: Record<string, unknown>[] = []
     await keyedSearch.search(echo(calls) as never, plain)
-    expect(calls[0].apiKey).toBe('test-key')
-    expect(JSON.stringify(calls[0].params)).not.toContain('test-key')
+    expect(calls[0]).toEqual({ params: { query: 'q' } })
+    expect(JSON.stringify(calls)).not.toContain('test-key')
   })
 
   test('force and ttlMs are not sent as search params', async () => {
